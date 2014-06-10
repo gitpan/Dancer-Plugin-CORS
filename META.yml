@@ -21,6 +21,6 @@ requires:
   Dancer: 1.312
   Modern::Perl: 0
   Sub::Name: 0
-  Test::More: 0
+  Test::Most: 0
   URI: 1.6
-version: 0.01
+version: 0.02
