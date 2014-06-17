@@ -23,4 +23,4 @@ requires:
   Sub::Name: 0
   Test::Most: 0
   URI: 1.6
-version: 0.02
+version: 0.10
