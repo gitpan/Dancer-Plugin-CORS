@@ -10,11 +10,11 @@ Dancer::Plugin::CORS::Sharing - Helper class for I<sharing> keyword
 
 =head1 VERSION
 
-Version 0.01
+Version 0.11
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.11';
 
 =head1 DESCRIPTION
 
@@ -67,6 +67,7 @@ This method defines a optionset. See L<Dancer::Plugin::CORS::share> for a explai
 sub rule($%) {
 	my ($self, %options) = @_;
 	push @{$self->{rules}} => \%options;
+	$self;
 }
 
 =head2 add(@routes)
@@ -89,6 +90,7 @@ sub add {
 			}
 		}
 	}
+	$self;
 }
 
 =head2 clear
@@ -98,7 +100,9 @@ This method clears all previously defined rules.
 =cut
 
 sub clear {
-	shift->{rules} = [];
+	my $self = shift;
+	$self->{rules} = [];
+	$self;
 }
 
 =head1 AUTHOR
