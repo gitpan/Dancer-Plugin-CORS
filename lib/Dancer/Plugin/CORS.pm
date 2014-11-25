@@ -1,40 +1,8 @@
+use strict;
+use warnings;
 package Dancer::Plugin::CORS;
+# ABSTRACT: A plugin for using cross origin resource sharing
 
-use Modern::Perl;
-use Dancer::Plugin::CORS::Sharing;
-
-=head1 NAME
-
-Dancer::Plugin::CORS - A plugin for using cross origin resource sharing
-
-=head1 VERSION
-
-Version 0.11
-
-=cut
-
-our $VERSION = '0.11';
-
-=head1 DESCRIPTION
-
-Cross origin resource sharing is a feature used by modern web browser to bypass cross site scripting restrictions. A webservice can provide those rules from which origin a client is allowed to make cross-site requests. This module helps you to setup such rules.
-
-=head1 SYNOPSIS
-
-    use Dancer::Plugin::CORS;
-
-    get '/foo' => sub { ... };
-	share '/foo' =>
-		origin => 'http://localhost/',
-		credentials => 1,
-		expose => [qw[ Content-Type ]],
-		method => 'GET',
-		headers => [qw[ X-Requested-With ]],
-		maxage => 7200,
-		timing => 1,
-	;
-
-=cut
 
 use Carp qw(croak confess);
 use Dancer ':syntax';
@@ -43,19 +11,27 @@ use Sub::Name;
 use Scalar::Util qw(blessed);
 use URI;
 
+use Dancer::Plugin::CORS::Sharing;
+
 use constant DEBUG => 0;
+
+our $VERSION = '0.13'; # VERSION
 
 my $routes = {};
 
 sub _isin($@) {
-	shift ~~ \@_;
+	my $test = shift;
+	scalar grep { $test eq $_ } @_;
 }
 
 sub _isuri(_) {
 	shift =~ m|(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?|
 }
 
+sub _prefl_handle;
+sub _add_rule($%);
 sub _handle;
+
 my $current_route;
 
 sub _prefl_handle {
@@ -80,6 +56,10 @@ sub _prefl_handle {
 sub _add_rule($%) {
 	my ($route, %options) = @_;
 	
+	if (ref $route eq 'ARRAY') {
+	    return map { _add_rule($_, %options) } @$route;
+	}
+
 	if (blessed $route and $route->isa('Dancer::Route')) {
 		my $prefl = Dancer::App->current->registry->add_route(Dancer::Route->new(
 			method => 'options',
@@ -142,9 +122,9 @@ sub _handle {
 	
 	if (exists $routes->{$route}) {
 		$path = "$route";
-		debug "[CORS] dynamic route" if DEBUG;
+		debug "[CORS] dynamic route: $path" if DEBUG;
 	} else {
-		debug "[CORS] static route" if DEBUG;
+		debug "[CORS] static route: $path" if DEBUG;
 	}
 	
 	my $n = scalar @{$routes->{$path}};
@@ -157,34 +137,29 @@ sub _handle {
 		}
 		$headers = {};
 		if (exists $options->{origin}) {
-			given (ref $options->{origin}) {
-				when ('CODE') {
-					if (!$options->{origin}->(URI->new($origin))) {
-						debug "[CORS] origin $origin did not matched against coderef" if DEBUG;
-						next RULE;
-					}
+			my $reftype = ref $options->{origin};
+			if ($reftype eq 'CODE') {
+				if (!$options->{origin}->(URI->new($origin))) {
+					debug "[CORS] origin $origin did not matched against coderef" if DEBUG;
+					next RULE;
 				}
-				when ('ARRAY') {
-					unless (_isin($origin => @{ $options->{origin} })) {
-						debug "[CORS] origin $origin is not in array" if DEBUG;
-						next RULE;
-					}
+			} elsif ($reftype eq 'ARRAY') {
+				unless (_isin $origin => @{ $options->{origin} }) {
+					debug "[CORS] origin $origin is not in array" if DEBUG;
+					next RULE;
 				}
-				when ('Regexp') {
-					unless ($origin =~ $options->{origin}) {
-						debug "[CORS] origin $origin did not matched against regexp" if DEBUG;
-						next RULE;
-					}
+			} elsif ($reftype eq 'Regexp') {
+				unless ($origin =~ $options->{origin}) {
+					debug "[CORS] origin $origin did not matched against regexp" if DEBUG;
+					next RULE;
 				}
-				when ('') {
-					unless ($options->{origin} eq $origin) {
-						debug "[CORS] origin $origin did not matched against static string" if DEBUG;
-						next RULE;
-					}
+			} elsif ($reftype eq '') {
+				unless ($options->{origin} eq $origin) {
+					debug "[CORS] origin $origin did not matched against static string" if DEBUG;
+					next RULE;
 				}
-				default {
-					confess("unknown origin type: $_");
-				}
+			} else {
+				confess("unknown origin type: $reftype");
 			}
 		} else {
 			$origin = '*';
@@ -215,7 +190,7 @@ sub _handle {
 		}
 		
 		if (exists $options->{methods}) {
-			unless (_isin(lc $requested_method => map lc, @{ $options->{methods} })) {
+			unless (_isin lc $requested_method => map lc, @{ $options->{methods} }) {
 				debug "[CORS] request method not allowed" if DEBUG;
 				next RULE;
 			}
@@ -230,7 +205,7 @@ sub _handle {
 		
 		if (exists $options->{headers}) {
 			foreach my $requested_header (@requested_headers) {
-				unless (_isin(lc $requested_header => map lc, @{ $options->{headers} })) {
+				unless (_isin lc $requested_header => map lc, @{ $options->{headers} }) {
 					debug "[CORS] requested headers did not match allowed in rule" if DEBUG;
 					next RULE;
 				}
@@ -263,7 +238,64 @@ sub _handle {
 	return $ok;
 }
 
-=head1 KEYWORDS
+
+register(share => \&_add_rule);
+
+hook(before => sub {
+	$current_route = shift || return;
+	my $preflight = uc Dancer::SharedData->request->method eq 'OPTIONS';
+	if ($preflight) {
+		debug "[CORS] pre-check: preflight request, handle within main subroutine" if DEBUG;
+	} else {
+		debug "[CORS] pre-check: no preflight, handle actual request now" if DEBUG;
+		_handle($current_route);
+	}
+});
+
+my $current_sharing;
+
+
+register sharing => sub {
+	my $class = __PACKAGE__.'::Sharing';
+	$current_sharing ||= $class->new(@_,_add_rule=>\&_add_rule);
+	return $current_sharing;
+};
+
+register_plugin;
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+Dancer::Plugin::CORS - A plugin for using cross origin resource sharing
+
+=head1 VERSION
+
+version 0.13
+
+=head1 DESCRIPTION
+
+Cross origin resource sharing is a feature used by modern web browser to bypass cross site scripting restrictions. A webservice can provide those rules from which origin a client is allowed to make cross-site requests. This module helps you to setup such rules.
+
+=head1 SYNOPSIS
+
+    use Dancer::Plugin::CORS;
+
+    get '/foo' => sub { ... };
+	share '/foo' =>
+		origin => 'http://localhost/',
+		credentials => 1,
+		expose => [qw[ Content-Type ]],
+		method => 'GET',
+		headers => [qw[ X-Requested-With ]],
+		maxage => 7200,
+		timing => 1,
+	;
+
+=head1 METHODS
 
 =head2 share(C<$route>, C<%options>)
 
@@ -271,8 +303,17 @@ The parameter C<$route> may be any valid path like used I<get>, I<post>, I<put>,
 
 Alternatively a L<Dancer::Route> object may be used instead:
 
-	$route = get '/' => sub { ... };
+	$route = post '/' => sub { ... };
 	share $route => ... ;
+
+Or a arrayref to one or more Routes:
+
+	@head_and_get = get '/' => sub { ... };
+	share \@head_and_get => ...;
+
+This syntax works too:
+
+	share [ get ('/' => sub { ... }) ] => ...;
 
 For any route more than one rule may be defined. The order is relevant: the first matching rule wins.
 
@@ -288,7 +329,11 @@ If not specified, any origin is allowed.
 
 If a subroutine is used, the first passed parameter is a L<URI> object. It should return a true value if this origin is allowed to access the route in question; otherwise false.
 
-	origin => sub { shift->host ~~ [ 'localhost', '127.0.0.1', '::1' ] } # allow only from localhost
+	origin => sub {
+		my $host = shift->host;
+		# allow only from localhost
+		grep { $host eq $_ } qw(localhost 127.0.0.1 ::1)
+	}
 
 Hint: a origin consists of protocol, hostname and maybe a port. Examples: C<http://www.example.com>, C<https://securesite.com>, C<http://localhost:3000>, C<http://127.0.0.1>, C<http://[::1]>
 
@@ -312,7 +357,7 @@ A string containing a single supported method. This parameter is autofilled when
 
 =item I<headers>
 
-A arrayref of allowed request headers. In most cases that should be C<[ 'X-Requested-With' ]> when ajax requests are made. If not headers are specified, all requested headers are allowed.
+A arrayref of allowed request headers. In most cases that should be C<[ 'X-Requested-With' ]> when ajax requests are made. If no headers are specified, all requested headers are allowed.
 
 =item I<maxage>
 
@@ -324,87 +369,31 @@ Allow access to the resource timing information. If set to 1, the header C<Timin
 
 =back
 
-=cut
-
-register(share => \&_add_rule);
-
-hook(before => sub {
-	$current_route = shift || return;
-	my $preflight = uc Dancer::SharedData->request->method eq 'OPTIONS';
-	if ($preflight) {
-		debug "[CORS] pre-check: preflight request, handle within main subroutine" if DEBUG;
-	} else {
-		debug "[CORS] pre-check: no preflight, handle actual request now" if DEBUG;
-		_handle($current_route);
-	}
-});
-
-my $current_sharing;
-
 =head2 sharing
 
 This keyword is a helper for re-using rules for many routes.
 
 See L<Dancer::Plugin::CORS::Sharing> for more information about this feature.
 
-=cut
+=head1 BUGS
 
-register sharing => sub {
-	my $class = __PACKAGE__.'::Sharing';
-	$current_sharing ||= $class->new(@_,_add_rule=>\&_add_rule);
-	return $current_sharing;
-};
+Please report any bugs or feature requests on the bugtracker website
+https://github.com/zurborg/libdancer-plugin-cors-perl/issues
+
+When submitting a bug or request, please include a test-file or a
+patch to an existing test-file that illustrates the bug or desired
+feature.
 
 =head1 AUTHOR
 
-David Zurborg, C<< <zurborg@cpan.org> >>
+David Zurborg <zurborg@cpan.org>
 
-=head1 BUGS
+=head1 COPYRIGHT AND LICENSE
 
-Please report any bugs or feature requests trough my project management tool
-at L<http://development.david-zurb.org/projects/libdancer-plugin-cors-perl/issues/new>.  I
-will be notified, and then you'll automatically be notified of progress on
-your bug as I make changes.
+This software is Copyright (c) 2014 by David Zurborg.
 
-=head1 SUPPORT
+This is free software, licensed under:
 
-You can find documentation for this module with the perldoc command.
-
-    perldoc Dancer::Plugin::CORS
-
-You can also look for information at:
-
-=over 4
-
-=item * Redmine: Homepage of this module
-
-L<http://development.david-zurb.org/projects/libdancer-plugin-cors-perl>
-
-=item * RT: CPAN's request tracker
-
-L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=Dancer-Plugin-CORS>
-
-=item * AnnoCPAN: Annotated CPAN documentation
-
-L<http://annocpan.org/dist/Dancer-Plugin-CORS>
-
-=item * CPAN Ratings
-
-L<http://cpanratings.perl.org/d/Dancer-Plugin-CORS>
-
-=item * Search CPAN
-
-L<http://search.cpan.org/dist/Dancer-Plugin-CORS/>
-
-=back
-
-=head1 COPYRIGHT & LICENSE
-
-Copyright 2014 David Zurborg, all rights reserved.
-
-This program is released under the following license: open-source
+  The ISC License
 
 =cut
-
-register_plugin;
-1;
